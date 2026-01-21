@@ -1,374 +1,328 @@
-#!/usr/bin/env python3
-"""
-asiabits Indices Tool (GitHub Actions version)
-Fetches market data from API and generates DE/EN PNG images
-Sends images directly to Lark group via App API
-"""
-
+import requests
 import json
-import os
-import urllib.request
+import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from playwright.sync_api import sync_playwright
+import base64
 
-# Check if playwright is available
-try:
-    from playwright.sync_api import sync_playwright
-    HAS_PLAYWRIGHT = True
-except ImportError:
-    HAS_PLAYWRIGHT = False
+# Lark Credentials
+LARK_APP_ID = "cli_a9e5e0e4ad38de19"
+LARK_APP_SECRET = "ME2g5rYepm8gP0xRduXqAhU62OKgnWmw"
+LARK_CHAT_ID = "oc_f4614007f39a5151ab32ece70013f87e"
 
-# Configuration
+# API Endpoint
 API_URL = "https://my-finance-api123-88898ea8eb5b.herokuapp.com/indices"
-OUTPUT_DIR = Path("./output")
 
-# Lark App Configuration (from environment variables or defaults)
-LARK_APP_ID = os.environ.get("LARK_APP_ID", "cli_a9e5e0e4ad38de19")
-LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "ME2g5rYepm8gP0xRduXqAhU62OKgnWmw")
-LARK_CHAT_ID = None  # Will be auto-detected
-
-# Shanghai timezone (UTC+8)
-SHANGHAI_TZ = timezone(timedelta(hours=8))
-
-# Index mapping: API name -> (Display name, Country code)
-INDEX_MAP = {
-    "Shanghai": ("Shanghai", "CN"),
-    "CSI 300": ("CSI 300", "CN"),
-    "Singapore": ("STI", "SG"),
-    "KOSPI": ("KOSPI", "KR"),
-    "Nikkei": ("Nikkei", "JP"),
-    "Hang Seng": ("Hang Seng", "HK"),
-}
-
-# ============ Lark API Functions ============
-
-def get_tenant_access_token():
+def get_lark_tenant_access_token():
     """Get Lark tenant access token"""
     url = "https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal"
-    data = json.dumps({
+    headers = {"Content-Type": "application/json"}
+    data = {
         "app_id": LARK_APP_ID,
         "app_secret": LARK_APP_SECRET
-    }).encode('utf-8')
+    }
     
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-    
-    with urllib.request.urlopen(req, timeout=10) as response:
-        result = json.loads(response.read().decode())
-        if result.get('code') == 0:
-            return result.get('tenant_access_token')
-        else:
-            raise Exception(f"Failed to get token: {result}")
+    response = requests.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()["tenant_access_token"]
 
-def get_bot_chats(token):
-    """Get list of chats the bot is in"""
-    url = "https://open.larksuite.com/open-apis/im/v1/chats?page_size=100"
+def fetch_indices_data():
+    """Fetch indices data from API"""
+    response = requests.get(API_URL)
+    response.raise_for_status()
+    return response.json()
+
+def format_number_de(value):
+    """Format number for German locale (1.234,56)"""
+    if value is None:
+        return "—"
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def format_number_en(value):
+    """Format number for English locale (1,234.56)"""
+    if value is None:
+        return "—"
+    return f"{value:,.2f}"
+
+def format_percent(value):
+    """Format percentage with + or - sign"""
+    if value is None:
+        return "—"
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value:.2f}%"
+
+def get_arrow(value):
+    """Get arrow symbol and color based on value"""
+    if value is None or value == 0:
+        return "", "#666666"
+    return ("▲", "#00AA00") if value > 0 else ("▼", "#DD0000")
+
+def generate_html(data, lang="de"):
+    """Generate HTML for the indices table"""
     
-    req = urllib.request.Request(url, headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    })
+    # FIXED TIMESTAMP: Always show 6:00 AM Shanghai time
+    shanghai_tz = timezone(timedelta(hours=8))
+    now = datetime.now(shanghai_tz)
+    fixed_time = now.replace(hour=6, minute=0, second=0, microsecond=0)
     
-    with urllib.request.urlopen(req, timeout=10) as response:
-        result = json.loads(response.read().decode())
-        if result.get('code') == 0:
-            return result.get('data', {}).get('items', [])
-        else:
-            raise Exception(f"Failed to get chats: {result}")
+    if lang == "de":
+        timestamp = fixed_time.strftime("%d.%m.%Y, %H:%M Uhr")
+        format_num = format_number_de
+        headers = ["Index", "Kurs", "24h %", "YTD %", "52W-High"]
+    else:
+        timestamp = fixed_time.strftime("%d.%m.%Y, %I:%M %p")
+        format_num = format_number_en
+        headers = ["Index", "Current", "24h %", "YTD %", "52W-High"]
+    
+    # Build table rows
+    rows_html = ""
+    for item in data:
+        change_24h = item.get("change_24h")
+        change_ytd = item.get("change_ytd")
+        
+        arrow_24h, color_24h = get_arrow(change_24h)
+        arrow_ytd, color_ytd = get_arrow(change_ytd)
+        
+        rows_html += f"""
+        <tr>
+            <td class="index-name">{item['name']}</td>
+            <td class="value">{format_num(item.get('current'))}</td>
+            <td class="change" style="color: {color_24h};">
+                {arrow_24h} {format_percent(change_24h)}
+            </td>
+            <td class="change" style="color: {color_ytd};">
+                {arrow_ytd} {format_percent(change_ytd)}
+            </td>
+            <td class="value">{format_num(item.get('high_52w'))}</td>
+        </tr>
+        """
+    
+    # Build header row
+    headers_html = "".join([f"<th>{h}</th>" for h in headers])
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                background: white;
+                padding: 40px;
+            }}
+            
+            .container {{
+                max-width: 1000px;
+                margin: 0 auto;
+            }}
+            
+            .header {{
+                margin-bottom: 30px;
+            }}
+            
+            h1 {{
+                font-size: 32px;
+                font-weight: 600;
+                color: #1a1a1a;
+                margin-bottom: 8px;
+            }}
+            
+            .timestamp {{
+                font-size: 14px;
+                color: #666666;
+            }}
+            
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: white;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                border-radius: 8px;
+                overflow: hidden;
+            }}
+            
+            th {{
+                background: #f8f9fa;
+                padding: 16px;
+                text-align: left;
+                font-weight: 600;
+                font-size: 14px;
+                color: #495057;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                border-bottom: 2px solid #dee2e6;
+            }}
+            
+            td {{
+                padding: 16px;
+                border-bottom: 1px solid #f0f0f0;
+                font-size: 15px;
+            }}
+            
+            tr:last-child td {{
+                border-bottom: none;
+            }}
+            
+            tr:hover {{
+                background: #f8f9fa;
+            }}
+            
+            .index-name {{
+                font-weight: 600;
+                color: #1a1a1a;
+            }}
+            
+            .value {{
+                color: #495057;
+                text-align: right;
+            }}
+            
+            .change {{
+                text-align: right;
+                font-weight: 500;
+            }}
+            
+            th:nth-child(1),
+            td:nth-child(1) {{
+                text-align: left;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>{"Asiatische Indizes" if lang == "de" else "Asian Indices"}</h1>
+                <div class="timestamp">{timestamp}</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>{headers_html}</tr>
+                </thead>
+                <tbody>
+                    {rows_html}
+                </tbody>
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
+def generate_image(html_content, output_path):
+    """Generate PNG image from HTML using Playwright"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1200, "height": 800})
+        page.set_content(html_content)
+        
+        # Wait for content to render
+        page.wait_for_timeout(1000)
+        
+        # Take screenshot
+        page.screenshot(path=output_path, full_page=True, scale="device")
+        browser.close()
 
 def upload_image_to_lark(token, image_path):
     """Upload image to Lark and get image_key"""
     url = "https://open.larksuite.com/open-apis/im/v1/images"
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
     
     with open(image_path, 'rb') as f:
-        image_data = f.read()
+        files = {
+            'image': (image_path, f, 'image/png')
+        }
+        data = {
+            'image_type': 'message'
+        }
+        response = requests.post(url, headers=headers, files=files, data=data)
     
-    boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-    
-    body = []
-    body.append(f'--{boundary}'.encode())
-    body.append(b'Content-Disposition: form-data; name="image_type"')
-    body.append(b'')
-    body.append(b'message')
-    
-    body.append(f'--{boundary}'.encode())
-    body.append(f'Content-Disposition: form-data; name="image"; filename="{Path(image_path).name}"'.encode())
-    body.append(b'Content-Type: image/png')
-    body.append(b'')
-    body.append(image_data)
-    
-    body.append(f'--{boundary}--'.encode())
-    
-    body_bytes = b'\r\n'.join(body)
-    
-    req = urllib.request.Request(url, data=body_bytes, headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': f'multipart/form-data; boundary={boundary}'
-    })
-    
-    with urllib.request.urlopen(req, timeout=30) as response:
-        result = json.loads(response.read().decode())
-        if result.get('code') == 0:
-            return result.get('data', {}).get('image_key')
-        else:
-            raise Exception(f"Failed to upload image: {result}")
+    response.raise_for_status()
+    return response.json()["data"]["image_key"]
 
-def send_image_to_chat(token, chat_id, image_key):
-    """Send image to Lark chat"""
-    url = f"https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=chat_id"
+def send_message_to_lark(token, chat_id, image_key, lang="de"):
+    """Send message with image to Lark chat"""
+    url = "https://open.larksuite.com/open-apis/im/v1/messages"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     
-    content = json.dumps({"image_key": image_key})
+    text = "Tägliche Indizes-Übersicht 📊" if lang == "de" else "Daily Indices Overview 📊"
     
-    data = json.dumps({
+    params = {
+        "receive_id_type": "chat_id"
+    }
+    
+    data = {
         "receive_id": chat_id,
-        "msg_type": "image",
-        "content": content
-    }).encode('utf-8')
+        "msg_type": "post",
+        "content": json.dumps({
+            "zh_cn": {
+                "title": text,
+                "content": [
+                    [
+                        {
+                            "tag": "img",
+                            "image_key": image_key
+                        }
+                    ]
+                ]
+            }
+        })
+    }
     
-    req = urllib.request.Request(url, data=data, headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    })
-    
-    with urllib.request.urlopen(req, timeout=10) as response:
-        result = json.loads(response.read().decode())
-        if result.get('code') == 0:
-            return True
-        else:
-            raise Exception(f"Failed to send image: {result}")
-
-def send_text_to_chat(token, chat_id, text):
-    """Send text message to Lark chat"""
-    url = f"https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=chat_id"
-    
-    content = json.dumps({"text": text})
-    
-    data = json.dumps({
-        "receive_id": chat_id,
-        "msg_type": "text",
-        "content": content
-    }).encode('utf-8')
-    
-    req = urllib.request.Request(url, data=data, headers={
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    })
-    
-    with urllib.request.urlopen(req, timeout=10) as response:
-        result = json.loads(response.read().decode())
-        if result.get('code') == 0:
-            return True
-        else:
-            raise Exception(f"Failed to send text: {result}")
-
-# ============ Data & Rendering Functions ============
-
-def fetch_data():
-    """Fetch indices data from API"""
-    req = urllib.request.Request(API_URL)
-    with urllib.request.urlopen(req, timeout=10) as response:
-        return json.loads(response.read().decode())
-
-def format_number_de(num):
-    formatted = f"{num:,.2f}"
-    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
-    return formatted
-
-def format_number_en(num):
-    return f"{num:,.2f}"
-
-def format_percent_de(pct):
-    if pct >= 0:
-        return f'<span style="color:#0f9d58;">▲ +{abs(pct):.2f}%</span>'.replace(".", ",")
-    else:
-        return f'<span style="color:#e03a3c;">▼ –{abs(pct):.2f}%</span>'.replace(".", ",")
-
-def format_percent_en(pct):
-    if pct >= 0:
-        return f'<span style="color:#0f9d58;">▲ +{abs(pct):.2f}%</span>'
-    else:
-        return f'<span style="color:#e03a3c;">▼ −{abs(pct):.2f}%</span>'
-
-def generate_html(data, lang="de"):
-    now_shanghai = datetime.now(SHANGHAI_TZ)
-    
-    if lang == "de":
-        title = "Indizes"
-        subtitle = "Marktüberblick"
-        col_price = "Kurs"
-        col_24h = "24 h"
-        col_ytd = "YTD"
-        col_52w = "52W-H"
-        timestamp = f'Zuletzt aktualisiert am <b style="color:#4d596a;">{now_shanghai.strftime("%d.%m.%Y, %H:%M")} Uhr</b> (GMT+8)'
-        format_num = format_number_de
-        format_pct = format_percent_de
-    else:
-        title = "Indices"
-        subtitle = "Market snapshot"
-        col_price = "Current"
-        col_24h = "24 h"
-        col_ytd = "YTD"
-        col_52w = "52W-H"
-        timestamp = f'Last updated on <b style="color:#4d596a;">{now_shanghai.strftime("%d.%m.%Y, %I:%M %p")}</b> (GMT+8)'
-        format_num = format_number_en
-        format_pct = format_percent_en
-    
-    rows_html = ""
-    for i, item in enumerate(data):
-        api_name = item["index"]
-        if api_name not in INDEX_MAP:
-            continue
-            
-        display_name, country = INDEX_MAP[api_name]
-        bg_color = "#fff" if i % 2 == 0 else "#fcfcfd"
-        
-        rows_html += f'''
-    <tr style="background:{bg_color};border-top:1px solid #f2f3f5;">
-      <td style="padding:12px 14px;">
-        <span style="display:inline-block;min-width:28px;padding:2px 6px;border-radius:10px;background:#f1f3f6;font-weight:700;font-size:11px;color:#3a4451;text-align:center;line-height:1.2;">{country}</span><span style="font-weight:600;color:#111826;margin-left:4px;">{display_name}</span>
-      </td>
-      <td style="padding:12px 8px;text-align:right;white-space:nowrap;">{format_num(item["current_price"])}</td>
-      <td style="padding:12px 8px;text-align:right;white-space:nowrap;">{format_pct(item["change_pct"])}</td>
-      <td style="padding:12px 8px;text-align:right;white-space:nowrap;">{format_pct(item["ytd_pct"])}</td>
-      <td style="padding:12px 14px;text-align:right;white-space:nowrap;">{format_num(item["week_52_high"])}</td>
-    </tr>'''
-    
-    html = f'''
-<div id="asiabits-card" style="max-width:480px;margin:14px auto;border:1px solid #e8ecef;border-radius:14px;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.03);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;overflow:hidden;">
-  <div style="max-width:480px;margin:0 auto;background:#fff;overflow:hidden;">
-    <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #f2f3f5;background:#fcfcfd;">
-      <div style="width:4px;height:18px;background:#D26C13;border-radius:4px;"></div>
-      <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#D26C13;font-weight:700;">{title}</div>
-      <div style="margin-left:auto;font-size:11px;color:#7a8594;">{subtitle}</div>
-    </div>
-    <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead>
-        <tr style="background:#fafbfc;">
-          <th style="text-align:left;padding:8px 14px;color:#7a8594;font-weight:600;">Index</th>
-          <th style="text-align:right;padding:8px;color:#7a8594;font-weight:600;">{col_price}</th>
-          <th style="text-align:right;padding:8px;color:#7a8594;font-weight:600;">{col_24h}</th>
-          <th style="text-align:right;padding:8px;color:#7a8594;font-weight:600;">{col_ytd}</th>
-          <th style="text-align:right;padding:8px 14px;color:#7a8594;font-weight:600;">{col_52w}</th>
-        </tr>
-      </thead>
-      <tbody>{rows_html}
-      </tbody>
-    </table>
-    <div style="padding:10px 14px;border-top:1px solid #f2f3f5;background:#fcfcfd;font-size:11px;color:#7a8594;display:flex;align-items:center;gap:6px;">
-      <div style="width:6px;height:6px;background:#D26C13;border-radius:50%;"></div>
-      {timestamp}
-    </div>
-  </div>
-</div>
-'''
-    return html
-
-def html_to_png(html_body, out_path, scale=3):
-    if not HAS_PLAYWRIGHT:
-        raise Exception("Playwright not installed")
-    
-    full_html = f"""
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        </style>
-      </head>
-      <body style="margin:0;padding:20px;background:#f5f6f8;">
-        {html_body}
-      </body>
-    </html>
-    """
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(device_scale_factor=scale)
-        page.set_content(full_html, wait_until="networkidle")
-        
-        card = page.locator("#asiabits-card")
-        card.screenshot(path=out_path, type="png")
-        
-        browser.close()
-    
-    return out_path
-
-# ============ Main Function ============
+    response = requests.post(url, headers=headers, params=params, json=data)
+    response.raise_for_status()
+    return response.json()
 
 def main():
-    global LARK_CHAT_ID
+    """Main function"""
+    print("🚀 Starting indices chart generation...")
     
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Fetch data
+    print("📊 Fetching indices data...")
+    data = fetch_indices_data()
     
     # Get Lark token
-    print("🔐 Getting Lark access token...")
-    try:
-        token = get_tenant_access_token()
-        print("✅ Token obtained")
-    except Exception as e:
-        print(f"❌ Failed to get Lark token: {e}")
-        token = None
+    print("🔑 Getting Lark access token...")
+    token = get_lark_tenant_access_token()
     
-    # Find chat ID
-    if token and not LARK_CHAT_ID:
-        print("🔍 Finding bot chats...")
-        try:
-            chats = get_bot_chats(token)
-            if chats:
-                print(f"📋 Found {len(chats)} chat(s):")
-                for chat in chats:
-                    print(f"   - {chat.get('name', 'Unknown')}: {chat.get('chat_id')}")
-                LARK_CHAT_ID = chats[0].get('chat_id')
-                print(f"✅ Using chat: {chats[0].get('name')}")
-            else:
-                print("⚠️ No chats found.")
-        except Exception as e:
-            print(f"❌ Failed to get chats: {e}")
-    
-    # Fetch market data
-    print("🔄 Fetching market data...")
-    data = fetch_data()
-    print(f"✅ Got {len(data)} indices")
-    
-    now_shanghai = datetime.now(SHANGHAI_TZ)
-    today = now_shanghai.strftime("%Y%m%d")
-    
-    # Generate images
-    print("🇩🇪 Generating German image...")
+    # Generate and send German version
+    print("🇩🇪 Generating German version...")
     html_de = generate_html(data, lang="de")
-    file_de = OUTPUT_DIR / f"indices_DE_{today}.png"
-    html_to_png(html_de, str(file_de))
-    print(f"✅ Saved {file_de}")
+    generate_image(html_de, "indices_de.png")
     
-    print("🇬🇧 Generating English image...")
+    print("📤 Uploading German image to Lark...")
+    image_key_de = upload_image_to_lark(token, "indices_de.png")
+    
+    print("💬 Sending German message to Lark...")
+    send_message_to_lark(token, LARK_CHAT_ID, image_key_de, lang="de")
+    
+    # Wait a bit before sending English version
+    time.sleep(2)
+    
+    # Generate and send English version
+    print("🇬🇧 Generating English version...")
     html_en = generate_html(data, lang="en")
-    file_en = OUTPUT_DIR / f"indices_EN_{today}.png"
-    html_to_png(html_en, str(file_en))
-    print(f"✅ Saved {file_en}")
+    generate_image(html_en, "indices_en.png")
     
-    # Send to Lark
-    if token and LARK_CHAT_ID:
-        print("📤 Sending images to Lark...")
-        try:
-            date_str = now_shanghai.strftime("%d.%m.%Y")
-            send_text_to_chat(token, LARK_CHAT_ID, f"📊 asiabits Indices - {date_str}")
-            
-            print("   Uploading DE image...")
-            image_key_de = upload_image_to_lark(token, str(file_de))
-            send_image_to_chat(token, LARK_CHAT_ID, image_key_de)
-            print("   ✅ DE image sent")
-            
-            print("   Uploading EN image...")
-            image_key_en = upload_image_to_lark(token, str(file_en))
-            send_image_to_chat(token, LARK_CHAT_ID, image_key_en)
-            print("   ✅ EN image sent")
-            
-            print("✅ All images sent to Lark!")
-        except Exception as e:
-            print(f"❌ Failed to send to Lark: {e}")
+    print("📤 Uploading English image to Lark...")
+    image_key_en = upload_image_to_lark(token, "indices_en.png")
     
-    print(f"\n🎉 Done!")
-    return str(file_de), str(file_en)
+    print("💬 Sending English message to Lark...")
+    send_message_to_lark(token, LARK_CHAT_ID, image_key_en, lang="en")
+    
+    print("✅ Done! Both charts sent to Lark successfully.")
 
 if __name__ == "__main__":
     main()
