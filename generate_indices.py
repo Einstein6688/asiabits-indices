@@ -84,7 +84,7 @@ def generate_html(data):
             padding: 20px;
         }}
         .container {{
-            max-width: 800px;
+            max-width: 650px;
             margin: 0 auto;
             background: white;
             border-radius: 12px;
@@ -230,7 +230,7 @@ def generate_html(data):
 def generate_image(html_content, output_path):
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 900, "height": 700})
+        page = browser.new_page(viewport={"width": 700, "height": 600}, device_scale_factor=3)
         page.set_content(html_content)
         page.wait_for_timeout(1000)
         element = page.query_selector('.container')
