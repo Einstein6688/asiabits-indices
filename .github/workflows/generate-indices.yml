@@ -7,8 +7,6 @@ name: Daily Indices Chart
                                                                              
   permissions:                                                               
     contents: write                                                          
-    pages: write                                                             
-    id-token: write                                                          
                                                                              
   jobs:                                                                      
     generate-and-publish:                                                    
@@ -40,4 +38,4 @@ name: Daily Indices Chart
             git add indices_de.png indices_en.png                            
             git diff --staged --quiet || git commit -m "Update indices charts
    $(date +'%Y-%m-%d')"                                                      
-            git push    
+            git push
