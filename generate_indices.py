@@ -1,14 +1,15 @@
 import requests
 import json
 import time
+import os
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
 import base64
 
-# Lark Credentials
-LARK_APP_ID = "cli_a9e5e0e4ad38de19"
-LARK_APP_SECRET = "ME2g5rYepm8gP0xRduXqAhU62OKgnWmw"
-LARK_CHAT_ID = "oc_f4614007f39a5151ab32ece70013f87e"
+# Lark Credentials (from environment variables or fallback to defaults)
+LARK_APP_ID = os.environ.get("LARK_APP_ID", "cli_a9e5e0e4ad38de19")
+LARK_APP_SECRET = os.environ.get("LARK_APP_SECRET", "ME2g5rYepm8gP0xRduXqAhU62OKgnWmw")
+LARK_CHAT_ID = os.environ.get("LARK_CHAT_ID", "oc_f4614007f39a5151ab32ece70013f87e")
 
 # API Endpoint
 API_URL = "https://my-finance-api123-88898ea8eb5b.herokuapp.com/indices"
@@ -282,6 +283,9 @@ def send_message_to_lark(token, chat_id, image_key, lang="de"):
     }
     
     response = requests.post(url, headers=headers, params=params, json=data)
+    if response.status_code != 200:
+        print(f"Lark API Error: {response.status_code}")
+        print(f"Response: {response.text}")
     response.raise_for_status()
     return response.json()
 
