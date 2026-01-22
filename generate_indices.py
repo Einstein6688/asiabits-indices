@@ -77,23 +77,23 @@ def generate_html(data, lang="de"):
     # Build table rows
     rows_html = ""
     for item in data:
-        change_24h = item.get("change_24h")
-        change_ytd = item.get("change_ytd")
-        
+        change_24h = item.get("change_pct")
+        change_ytd = item.get("ytd_pct")
+
         arrow_24h, color_24h = get_arrow(change_24h)
         arrow_ytd, color_ytd = get_arrow(change_ytd)
-        
+
         rows_html += f"""
         <tr>
-            <td class="index-name">{item['name']}</td>
-            <td class="value">{format_num(item.get('current'))}</td>
+            <td class="index-name">{item['index']}</td>
+            <td class="value">{format_num(item.get('current_price'))}</td>
             <td class="change" style="color: {color_24h};">
                 {arrow_24h} {format_percent(change_24h)}
             </td>
             <td class="change" style="color: {color_ytd};">
                 {arrow_ytd} {format_percent(change_ytd)}
             </td>
-            <td class="value">{format_num(item.get('high_52w'))}</td>
+            <td class="value">{format_num(item.get('week_52_high'))}</td>
         </tr>
         """
     
