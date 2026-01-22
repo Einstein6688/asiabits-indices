@@ -1,6 +1,6 @@
 name: Daily Indices Chart                                                  
                                                                              
-  on:                                                                        
+on:                                                                        
     schedule:                                                                
       - cron: '0 20 * * 0-4'                                                 
     workflow_dispatch:                                                       
