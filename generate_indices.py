@@ -44,7 +44,8 @@ def get_arrow(value):
 def generate_html(data):
     shanghai_tz = timezone(timedelta(hours=8))
     now = datetime.now(shanghai_tz)
-    timestamp = now.strftime("%d.%m.%Y, %I:%M %p")
+    fixed_time = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    timestamp = fixed_time.strftime("%d.%m.%Y, 06:00 AM")
 
     rows_html = ""
     for item in data:
